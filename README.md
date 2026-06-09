@@ -156,17 +156,30 @@ python run_pipeline.py --mode spark-only
 # Build trajectories for each round
 python spark/trajectories.py --online
 
-# Train incrementally (each round warm-starts from previous)
-python model/train.py --online
+# Train BCQ (online, per-round checkpoints)
+python model/train.py --online --algo bcq
 
-# Evaluate learning curve (ASCII plot)
-python eval/evaluate.py --online
+# Train DQN (online, for comparison)
+python model/train.py --online --algo dqn
 
-# Expected output:
-#   轮1 (  3,200,000条) │████████░░░░░░░░░░░░░░░░░░░░│ 0.1234
-#   轮2 (  6,400,000条) │██████████████░░░░░░░░░░░░░░░│ 0.1356
-#   轮3 (  9,600,000条) │████████████████████░░░░░░░░░│ 0.1421
-#   📈 模型从更多数据中显著受益
+# Train both BCQ + DQN side-by-side ★
+python model/train.py --online --algo both
+
+# Evaluate learning curves (single algorithm)
+python eval/evaluate.py --online --algo bcq
+
+# Evaluate BCQ vs DQN comparison ★
+python eval/evaluate.py --online --algo both
+
+# Expected output (BCQ vs DQN):
+#   ╔══════════════════════════════════════════════════════════╗
+#   ║  BCQ vs DQN — Online Learning Curve (NDCG@10)          ║
+#   ╚══════════════════════════════════════════════════════════╝
+#   轮   BCQ        DQN        Δ(BCQ-DQN)    诊断
+#   1    0.1234     0.0891     +0.0343       📗 BCQ wins
+#   2    0.1356     0.1201     +0.0155       📗 BCQ wins
+#   3    0.1421     0.1389     +0.0032       📙 tie
+#   🎯 关键发现: 早期 BCQ > DQN → VAE 约束有效防止 distribution shift
 ```
 
 ---

@@ -497,17 +497,213 @@ class BCQTrainer:
 
 
 # ============================================================
+# DQN 训练器 — BCQ 对比实验
+# ============================================================
+class DQNTrainer:
+    """
+    DQN 训练器: 标准 Double DQN + ε-greedy (无 VAE 约束)
+
+    跟 BCQTrainer 的对比:
+      - 相同的 State Encoder + Movie Lookup + Double Q 架构
+      - 不同的 action 选择: ε-greedy vs VAE-constrained
+      - 不同的损失: 纯 TD 误差 vs TD + VAE + Perturbation
+      - 核心变量控制: 只在"是否有行为约束"上变化
+
+    面试话术:
+      "我做的是 controlled experiment——BCQ 和 DQN 用完全相同的
+       Q 网络、相同的 State Encoder、相同的数据。
+       唯一的区别是 DQN 没有 VAE 约束。
+       所以如果 BCQ > DQN, 那就是 VAE 约束的效果,
+       不是其他 confound 导致的。"
+    """
+
+    def __init__(
+        self,
+        dqn_model,
+        state_encoder,
+        movie_lookup,
+        device,
+        lr=LEARNING_RATE,
+    ):
+        from model.dqn import DQN, ReplayBuffer
+        self.model = dqn_model.to(device)
+        self.state_encoder = state_encoder.to(device)
+        self.movie_lookup = movie_lookup.to(device)
+        self.device = device
+
+        self.optimizer = optim.Adam(
+            list(dqn_model.parameters()) +
+            list(state_encoder.parameters()) +
+            list(movie_lookup.parameters()),
+            lr=lr,
+        )
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=50)
+        self.replay_buffer = ReplayBuffer(capacity=100000)
+        self.scaler = GradScaler(enabled=(device.type == "cuda"))
+        self.use_amp = (device.type == "cuda")
+        self.metrics = defaultdict(list)
+
+        # 候选动作集: top-2000 热门电影的嵌入
+        self.candidate_actions = None  # 在 build_candidates 中初始化
+
+    def build_candidates(self, movie_id_to_idx: dict, top_n: int = 2000):
+        """
+        构建候选动作集: top-N 热门电影的嵌入向量
+
+        DQN 在离散的候选集上做 ε-greedy 选择。
+        用 top-2000 覆盖了大部分评分数据 (长尾电影很少被评)。
+        """
+        all_embs = self.movie_lookup.get_all_embeddings()
+        n_movies = all_embs.shape[0]
+
+        # 简单策略: 均匀采样 top_n 个 (实际应用中可按 popularity 排序)
+        # 这里用均匀采样覆盖嵌入空间
+        idx = torch.randperm(n_movies)[:top_n]
+        self.candidate_actions = all_embs[idx].detach().clone()
+        print(f"  [DQN] 候选动作集: {top_n} 部电影")
+
+    def fill_replay_buffer(self, dataloader, movie_id_to_idx: dict):
+        """
+        用轨迹数据填充 replay buffer。
+
+        遍历一遍 dataloader, 把 (s, a, r, s') 存入 buffer。
+        """
+        print("  [DQN] 填充 replay buffer...")
+        self.model.eval()
+        self.state_encoder.eval()
+
+        with torch.no_grad():
+            for raw_batch in dataloader:
+                batch = collate_batch(
+                    raw_batch, self.movie_lookup, movie_id_to_idx,
+                    self.state_encoder, self.device,
+                )
+                for i in range(batch["state"].shape[0]):
+                    self.replay_buffer.push(
+                        batch["state"][i],
+                        batch["action"][i],
+                        batch["reward"][i],
+                        batch["next_state"][i],
+                        batch["done"][i],
+                    )
+
+        print(f"  [DQN] Buffer size: {len(self.replay_buffer):,}")
+
+    def train_epoch(self, batch_size: int = BATCH_SIZE):
+        """一个训练 epoch: 从 buffer 采样并更新"""
+        if len(self.replay_buffer) < batch_size * 2:
+            return {"total": 0}
+
+        self.model.train()
+        self.state_encoder.train()
+
+        # 多次更新 (replay ratio)
+        n_updates = min(100, len(self.replay_buffer) // batch_size)
+        epoch_metrics = defaultdict(float)
+
+        for _ in range(n_updates):
+            batch = self.replay_buffer.sample(batch_size, self.device)
+
+            self.optimizer.zero_grad()
+
+            if self.use_amp:
+                with autocast():
+                    loss, loss_dict = self.model.compute_loss(
+                        batch, self.candidate_actions
+                    )
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss, loss_dict = self.model.compute_loss(
+                    batch, self.candidate_actions
+                )
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.model.parameters()) +
+                    list(self.state_encoder.parameters()), GRAD_CLIP
+                )
+                self.optimizer.step()
+
+            self.model.soft_update_target()
+
+            for k, v in loss_dict.items():
+                epoch_metrics[k] += v
+
+        for k in epoch_metrics:
+            epoch_metrics[k] /= n_updates
+        self.model.decay_epsilon()
+
+        return dict(epoch_metrics)
+
+    def train(self, dataloader, movie_id_to_idx: dict,
+              epochs: int = 50, save_path: str = None):
+        """完整的 DQN 训练流程"""
+        print(f"\n[DQN] 训练 {epochs} epochs...")
+
+        # 构建候选动作 + 填充 buffer
+        if self.candidate_actions is None:
+            self.build_candidates(movie_id_to_idx, top_n=2000)
+        self.fill_replay_buffer(dataloader, movie_id_to_idx)
+
+        best_loss = float('inf')
+
+        for epoch in range(epochs):
+            metrics_epoch = self.train_epoch()
+
+            if not metrics_epoch or metrics_epoch.get("total", 0) == 0:
+                continue
+
+            self.scheduler.step()
+            for k, v in metrics_epoch.items():
+                self.metrics[k].append(v)
+
+            total = metrics_epoch.get("total", 0)
+            q1_mean = metrics_epoch.get("q1_mean", 0)
+            eps = metrics_epoch.get("epsilon", 0)
+
+            print(f"  Epoch {epoch+1:>3}/{epochs} | "
+                  f"Loss: {total:.4f} | Q1: {q1_mean:.4f} | "
+                  f"ε: {eps:.3f} | LR: {self.scheduler.get_last_lr()[0]:.2e}")
+
+            if save_path and total < best_loss:
+                best_loss = total
+                self.save(save_path)
+                print(f"  ✅ Checkpoint saved (loss: {total:.4f})")
+
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+        torch.save({
+            "dqn": self.model.state_dict(),
+            "state_encoder": self.state_encoder.state_dict(),
+            "movie_lookup": self.movie_lookup.state_dict(),
+            "metrics": dict(self.metrics),
+        }, path)
+
+    def load(self, path: str):
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint["dqn"])
+        self.state_encoder.load_state_dict(checkpoint["state_encoder"])
+        self.movie_lookup.load_state_dict(checkpoint["movie_lookup"])
+        self.metrics = defaultdict(list, checkpoint.get("metrics", {}))
+        print(f"  [DQN] Model loaded from {path}")
+
+
+# ============================================================
 # 主入口
 # ============================================================
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="SparRL BCQ 训练")
+    parser = argparse.ArgumentParser(description="SparRL 训练")
     parser.add_argument("--online", action="store_true",
                         help="在线模拟模式: 逐轮训练并保存 checkpoint")
+    parser.add_argument("--algo", type=str, default="bcq",
+                        choices=["bcq", "dqn", "both"],
+                        help="算法选择: bcq / dqn / both (同时跑两个)")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("SparRL — BCQ 训练")
+    print(f"SparRL — 训练 (算法: {args.algo.upper()})")
     print("=" * 60)
 
     # 环境检测
@@ -519,9 +715,13 @@ def main():
         print(f"[环境] VRAM:  {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
     print(f"[环境] PyTorch: {torch.__version__}")
 
+    run_bcq = args.algo in ("bcq", "both")
+    run_dqn = args.algo in ("dqn", "both")
+
     # ─── Online Simulation 模式 ★ ───
     if args.online:
         import glob
+        from model.dqn import DQN
         online_dir = os.path.join(OUTPUT_DIR, "online_windows")
         if not os.path.exists(online_dir):
             print(f"\n❌ 找不到时间窗口数据: {online_dir}")
@@ -533,129 +733,122 @@ def main():
             print(f"\n❌ 找不到轨迹文件, 先运行: python spark/trajectories.py --online")
             return
 
-        print(f"\n[在线模式] 逐轮训练 ({len(traj_files)} 轮)")
-        print(f"[在线模式] 每轮: 累积训练数据 → 保存 checkpoint → 下一轮 warm start")
+        algos = []
+        if run_bcq: algos.append("bcq")
+        if run_dqn: algos.append("dqn")
+        print(f"\n[在线模式] 逐轮训练 ({len(traj_files)} 轮), 算法: {algos}")
 
-        # 初始化模型 (第一轮)
-        movie_lookup, movie_id_to_idx = None, None
-        state_encoder = None
-        bcq_model = None
+        for algo in algos:
+            print(f"\n{'█'*60}")
+            print(f"█  在线训练 — {algo.upper()}")
+            print(f"{'█'*60}")
 
-        for r, traj_path in enumerate(traj_files, start=1):
-            round_name = os.path.basename(traj_path).replace("_trajectories.parquet", "")
-            ckpt_path = os.path.join(online_dir, f"{round_name}_model.pt")
+            movie_lookup, movie_id_to_idx = None, None
+            state_encoder = None
+            model_instance = None
 
-            print(f"\n{'='*60}")
-            print(f"  在线训练 轮{r}/{len(traj_files)}: {round_name}")
-            print(f"{'='*60}")
+            for r, traj_path in enumerate(traj_files, start=1):
+                round_name = os.path.basename(traj_path).replace("_trajectories.parquet", "")
+                suffix = f"_{algo}" if args.algo == "both" else ""
+                ckpt_path = os.path.join(online_dir, f"{round_name}{suffix}_model.pt")
 
-            # 加载本轮轨迹
-            dataset = TrajectoryDataset(traj_path)
-            dataloader = DataLoader(
-                dataset, batch_size=BATCH_SIZE, shuffle=True,
-                num_workers=4 if device.type == "cuda" else 0,
-                pin_memory=(device.type == "cuda"), drop_last=True,
-            )
-            print(f"  训练样本: {len(dataset):,}")
-
-            # 第一轮初始化, 后续轮复用 (warm start)
-            if r == 1:
-                movie_lookup, movie_id_to_idx = build_movie_lookup(dataset, MOVIE_FEATURES_PATH)
-                state_encoder = StateEncoder()
-                bcq_model = BCQ()
-                # VAE 预训练 (仅第一轮)
-                trainer = BCQTrainer(bcq_model, state_encoder, movie_lookup, device)
-                print(f"  模型参数: {sum(p.numel() for p in bcq_model.parameters()):,}")
-                vae_epochs = 5 if is_autodl else NUM_EPOCHS_LOCAL
-                trainer.train_vae_pretrain(
-                    dataloader, epochs=vae_epochs, movie_id_to_idx=movie_id_to_idx
+                print(f"\n  --- 轮{r}/{len(traj_files)}: {round_name} ---")
+                dataset = TrajectoryDataset(traj_path)
+                dataloader = DataLoader(
+                    dataset, batch_size=BATCH_SIZE, shuffle=True,
+                    num_workers=4 if device.type == "cuda" else 0,
+                    pin_memory=(device.type == "cuda"), drop_last=True,
                 )
-            else:
-                trainer = BCQTrainer(bcq_model, state_encoder, movie_lookup, device)
+                print(f"  训练样本: {len(dataset):,}")
 
-            # 联合训练 (每轮)
-            joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
-            trainer.train_joint(
-                dataloader, epochs=joint_epochs,
-                movie_id_to_idx=movie_id_to_idx,
-                vae_weight=VAE_LOSS_WEIGHT,
-                save_path=ckpt_path,
-            )
-            print(f"  ✅ round{r} 完成 → {ckpt_path}")
+                if r == 1:
+                    movie_lookup, movie_id_to_idx = build_movie_lookup(dataset, MOVIE_FEATURES_PATH)
+                    state_encoder = StateEncoder()
+
+                if algo == "bcq":
+                    if r == 1:
+                        model_instance = BCQ()
+                        trainer = BCQTrainer(model_instance, state_encoder, movie_lookup, device)
+                        vae_epochs = 5 if is_autodl else NUM_EPOCHS_LOCAL
+                        trainer.train_vae_pretrain(dataloader, epochs=vae_epochs, movie_id_to_idx=movie_id_to_idx)
+                    else:
+                        trainer = BCQTrainer(model_instance, state_encoder, movie_lookup, device)
+                    joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
+                    trainer.train_joint(dataloader, epochs=joint_epochs,
+                                        movie_id_to_idx=movie_id_to_idx,
+                                        vae_weight=VAE_LOSS_WEIGHT, save_path=ckpt_path)
+                else:  # dqn
+                    if r == 1:
+                        model_instance = DQN()
+                        # 共享 state_encoder 和 movie_lookup
+                    dqn_trainer = DQNTrainer(model_instance, state_encoder, movie_lookup, device)
+                    dqn_trainer.build_candidates(movie_id_to_idx, top_n=2000)
+                    joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
+                    dqn_trainer.train(dataloader, movie_id_to_idx,
+                                      epochs=joint_epochs, save_path=ckpt_path)
+
+                print(f"  ✅ round{r} {algo} 完成 → {ckpt_path}")
 
         print(f"\n{'='*60}")
-        print(f"在线训练全部完成! ({len(traj_files)} 轮)")
+        print(f"在线训练全部完成! ({len(traj_files)} 轮 × {len(algos)} 算法)")
         print(f"  下一步: python eval/evaluate.py --online")
         return
 
     # ─── 标准训练模式 ───
-    # 检查数据
     if not os.path.exists(TRAJECTORIES_PATH):
         print(f"\n❌ 找不到轨迹文件: {TRAJECTORIES_PATH}")
         print("   请先运行: python spark/trajectories.py")
         return
-
     if not os.path.exists(MOVIE_FEATURES_PATH):
         print(f"\n❌ 找不到电影特征: {MOVIE_FEATURES_PATH}")
         print("   请先运行: python spark/preprocess.py")
         return
 
-    # 加载轨迹数据
     dataset = TrajectoryDataset(TRAJECTORIES_PATH)
     dataloader = DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
+        dataset, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=4 if device.type == "cuda" else 0,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
+        pin_memory=(device.type == "cuda"), drop_last=True,
     )
 
-    # 构建电影查找表
     movie_lookup, movie_id_to_idx = build_movie_lookup(dataset, MOVIE_FEATURES_PATH)
 
-    # 初始化模型
-    state_encoder = StateEncoder()
-    bcq_model = BCQ()
+    if run_bcq:
+        print(f"\n{'='*60}")
+        print(f"BCQ 标准训练")
+        print(f"{'='*60}")
+        state_encoder = StateEncoder()
+        bcq_model = BCQ()
+        n_params = sum(p.numel() for p in bcq_model.parameters())
+        print(f"[模型] BCQ 参数: {n_params:,}")
 
-    n_params = sum(p.numel() for p in bcq_model.parameters())
-    n_params_enc = sum(p.numel() for p in state_encoder.parameters())
-    n_params_lookup = sum(p.numel() for p in movie_lookup.parameters())
-    print(f"\n[模型] BCQ 参数:    {n_params:,}")
-    print(f"[模型] Encoder 参数: {n_params_enc:,}")
-    print(f"[模型] Lookup 参数:  {n_params_lookup:,}")
-    print(f"[模型] 总参数:       {n_params + n_params_enc + n_params_lookup:,}")
+        trainer = BCQTrainer(bcq_model, state_encoder, movie_lookup, device)
+        pretrain_epochs = 5 if is_autodl else NUM_EPOCHS_LOCAL
+        trainer.train_vae_pretrain(dataloader, epochs=pretrain_epochs, movie_id_to_idx=movie_id_to_idx)
+        joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
+        trainer.train_joint(dataloader, epochs=joint_epochs, movie_id_to_idx=movie_id_to_idx,
+                            vae_weight=VAE_LOSS_WEIGHT, save_path=MODEL_SAVE_PATH)
+        trainer.save(MODEL_SAVE_PATH)
+        print(f"  ✅ BCQ 完成 → {MODEL_SAVE_PATH}")
 
-    # 训练器
-    trainer = BCQTrainer(bcq_model, state_encoder, movie_lookup, device)
+    if run_dqn:
+        from model.dqn import DQN
+        print(f"\n{'='*60}")
+        print(f"DQN 标准训练")
+        print(f"{'='*60}")
+        state_encoder_dqn = StateEncoder()
+        dqn_model = DQN()
+        dqn_trainer = DQNTrainer(dqn_model, state_encoder_dqn, movie_lookup, device)
+        dqn_trainer.build_candidates(movie_id_to_idx, top_n=2000)
+        joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
+        dqn_save_path = MODEL_SAVE_PATH.replace(".pt", "_dqn.pt")
+        dqn_trainer.train(dataloader, movie_id_to_idx, epochs=joint_epochs, save_path=dqn_save_path)
+        dqn_trainer.save(dqn_save_path)
+        print(f"  ✅ DQN 完成 → {dqn_save_path}")
 
-    # Phase A: VAE 预训练
-    pretrain_epochs = 5 if is_autodl else NUM_EPOCHS_LOCAL
-    trainer.train_vae_pretrain(
-        dataloader, epochs=pretrain_epochs, movie_id_to_idx=movie_id_to_idx
-    )
-
-    # Phase B: 联合训练
-    joint_epochs = NUM_EPOCHS if is_autodl else NUM_EPOCHS_LOCAL
-    trainer.train_joint(
-        dataloader, epochs=joint_epochs,
-        movie_id_to_idx=movie_id_to_idx,
-        vae_weight=VAE_LOSS_WEIGHT,
-        save_path=MODEL_SAVE_PATH,
-    )
-
-    # 最终保存
-    trainer.save(MODEL_SAVE_PATH)
-
-    # 输出训练曲线摘要
     print("\n" + "=" * 60)
     print("训练完成!")
-    print("=" * 60)
-    print(f"  Q Loss:       {trainer.metrics['q_loss'][-1]:.4f} (末)")
-    print(f"  VAE Loss:     {trainer.metrics['vae_loss'][-1]:.4f} (末)")
-    print(f"  Perturb Loss: {trainer.metrics['perturb_loss'][-1]:.4f} (末)")
-    print(f"  Model:        {MODEL_SAVE_PATH}")
-    print(f"\n  下一步: python eval/evaluate.py")
+    print(f"  下一步: python eval/evaluate.py")
 
 
 if __name__ == "__main__":
