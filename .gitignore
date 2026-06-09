@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (MovieLens 25M — too large, download separately)
+data/ml-25m/
+*.zip
+*.csv
+*.tsv
+
+# Output (generated at runtime)
+output/
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+*.ckpt
+
+# Spark
+metastore_db/
+derby.log
+spark-warehouse/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

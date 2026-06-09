@@ -1,0 +1,10 @@
+# SparRL 依赖 — AutoDL / 本地
+# PySpark 4.x (需要 Java 8/11/21)
+pyspark>=4.0.0
+# PyTorch (AutoDL 上通常已预装, 根据 CUDA 版本选)
+torch>=2.0.0
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.0.0
+pyarrow>=10.0.0
