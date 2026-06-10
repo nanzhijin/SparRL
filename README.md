@@ -2,276 +2,208 @@
   <img src="https://img.shields.io/badge/Python-3.13-blue?logo=python" alt="Python">
   <img src="https://img.shields.io/badge/PySpark-4.1.2-orange?logo=apache-spark" alt="PySpark">
   <img src="https://img.shields.io/badge/PyTorch-2.6-red?logo=pytorch" alt="PyTorch">
-  <img src="https://img.shields.io/badge/RL-BCQ-purple" alt="BCQ">
   <img src="https://img.shields.io/badge/data-MovieLens%2025M-green" alt="MovieLens">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
+  <img src="https://img.shields.io/badge/status-learning-blueviolet" alt="Learning">
 </p>
 
 <h1 align="center">SparRL</h1>
-<h3 align="center">Spark + Offline Reinforcement Learning for Recommendation</h3>
+<h3 align="center">Spark 分布式推荐系统 + 强化学习技术探索</h3>
 
 <p align="center">
-  <b>把推荐建模成序列决策问题，用 Spark 分布式构建轨迹，用 BCQ 离线强化学习策略。</b><br>
-  <i>Recommendation as Sequential Decision Making — Spark for Trajectories, BCQ for Policy.</i>
+  <b>工程主线：用 Spark 窗口函数处理 2500 万条评分数据，构建推荐模型训练管线。</b><br>
+  <b>技术探索：跟着王喆《深度学习推荐系统 2.0》尝试用离线强化学习建模推荐决策。</b><br>
+  <i>A Spark-based recommendation pipeline with an RL exploration side-quest.</i>
 </p>
 
 ---
 
-## 🎯 Why SparRL?
+## 🎯 这个项目做了什么
 
-| 传统推荐 | SparRL |
-|----------|--------|
-| (user, movie) → rating 监督学习 | (state, action) → reward 序列决策 |
-| 拟合历史行为 | 学习最优推荐策略 |
-| 单机 Pandas / SQL | **Spark 分布式窗口函数** |
-| 离线评估只有 train/test split | **Online Simulation + 时间窗口学习曲线** |
-| ItemCF / Two-Tower | **BCQ (VAE + Perturbation + Double Q)** |
+**背景**：我在准备推荐算法岗位的面试。作为非科班转行的本科生，我需要一个能展示工程能力的项目——而不是一个"看起来很厉害但我自己都讲不清楚"的项目。
 
-**差异化**：Spark 工程 + 强化学习算法 + 推荐系统领域，三交叉。市面上几乎没有同类项目。
+**工程主线（我真正掌握的部分）**：
 
----
+| 做了什么 | 怎么做的 | 为什么值得讲 |
+|----------|---------|------------|
+| 数据管线 | PySpark 处理 25M 条评分 → parquet | 工业级数据量，不是 pandas 能扛的 |
+| 特征工程 | genre multi-hot / year 分桶 / 统计特征 | 内容特征 + 协同特征的混合设计 |
+| 轨迹构建 | 窗口函数 `PARTITION BY userId ORDER BY timestamp ROWS BETWEEN` | 把静态评分表变成可训练的序列样本 |
+| 模型训练 | PyTorch DataLoader + GRU 序列编码 + 电影嵌入 | 端到端的训练管线 |
+| 评估框架 | 时间窗口在线模拟 → NDCG 学习曲线 | 比单次 train/test split 多看一个维度 |
+| Baseline | ItemCF（纯 pandas 手写）+ Popularity + Random | 没有对比就没有结论 |
 
-## 🏗 Architecture
+**技术探索（我正在学习中的部分）**：
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        SPARK LAYER (Distributed)                      │
-│                                                                       │
-│   MovieLens 25M  ───→  preprocess.py  ───→  trajectories.py  ───→ ope.py│
-│   (25M ratings)       Feature Engineering    Window Functions ★     OPE │
-│                       user/movie features    PARTITION BY userId      IPS │
-│                       genre + year + stats   ROWS BETWEEN K          DM  │
-│                       → parquet              → trajectory parquet    DR  │
-│                                                                       │
-│   ★ Key: Lazy Eval · Wide/Narrow Dependency · Shuffle · Broadcast Join   │
-└───────────────────────────────────┬─────────────────────────────────┘
-                                    │ trajectories & features
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     PyTorch LAYER (BCQ Deep RL)                      │
-│                                                                       │
-│   ┌──────────────────┐   ┌──────────────────┐   ┌─────────────────┐ │
-│   │ State Encoder (GRU)│  │ BCQ Generator (VAE)│  │ Q-Network (×2)   │ │
-│   │ encode rating      │──▶│ constrain policy    │──▶│ evaluate (s,a)  │ │
-│   │ history → vector   │   │ via data support    │   │ → best action   │ │
-│   └──────────────────┘   └──────────────────┘   └─────────────────┘ │
-│                                                                       │
-│   π(s) = argmax_{a ~ G(s)} Q(s, a + ξ(s,a))                          │
-│                      ↑ VAE sampling      ↑ perturbation (|ξ| ≤ Φ)    │
-│                                                                       │
-│   ★ Key: Offline RL · Distribution Shift · Double DQN · VAE · Polyak │
-└─────────────────────────────────────────────────────────────────────┘
-```
+跟着**王喆老师《深度学习推荐系统 2.0》**的思路，我尝试把推荐建模成序列决策问题（MDP），用离线强化学习（BCQ）替代监督学习。目前的理解深度：知道为什么 RL 比监督学习更适合序列推荐场景，能讲清楚 Distribution Shift 的问题直觉，但 VAE 的数学推导和 OPE 的统计性质还在学习。
+
+**我自己做的对比实验**：在同一个数据上跑了 BCQ 和 DQN，在线模拟中 BCQ 在数据稀疏的早期轮次表现更好——这验证了书里讲的"离线场景下无约束 Q-Learning 会外推错误"的理论。这个实验结果让我对 RL 在推荐领域的价值有了直观感受。
+
+> ⚠️ **诚实声明**：这个项目的代码在 **Claude Code** 的辅助下完成。每个技术决策我过了一遍理解，但不是每个数学细节我都能手推。项目状态是"学习中"，不是"学完了"。
 
 ---
 
-## 📂 Project Structure
+## 🏗 项目结构
 
 ```
 SparkPractice/
-├── config.py                  # Global config (paths, hyperparams, AutoDL detection)
-├── run_pipeline.py            # End-to-end pipeline (local/full/spark-only/train-only)
-├── requirements.txt           # pip dependencies
-├── itemcf_pandas.py           # ItemCF baseline (pure pandas, 0 ML libs)
+├── config.py                  # 全局配置
+├── run_pipeline.py            # 端到端管线 (local/full/spark-only/train-only)
+├── requirements.txt
+├── itemcf_pandas.py           # ItemCF baseline (纯 pandas，0 ML 库)
 │
-├── spark/                     # Spark data pipeline
-│   ├── preprocess.py          # Feature engineering (6 modules) + time-window split ★
-│   ├── trajectories.py        # RL trajectory construction via window functions ★ Core
-│   └── ope.py                 # Offline Policy Evaluation (IPS / DM / DR)
+├── spark/                     # Spark 数据管线 ★ 工程核心
+│   ├── preprocess.py          # 特征工程 + 时间窗口切割 + 数据输出
+│   ├── trajectories.py        # 窗口函数轨迹构建 ★ 核心 Spark 代码
+│   └── ope.py                 # 离线策略评估 (IPS/DM/DR)
 │
-├── model/                     # PyTorch BCQ model
-│   ├── embeddings.py          # Movie embedding + GRU State Encoder
-│   ├── bcq.py                 # BCQ: VAE Generator + Perturbation + Double Q-Network
-│   └── train.py               # Training loop (VAE pretrain → joint training)
+├── model/                     # PyTorch 模型
+│   ├── embeddings.py          # 电影嵌入 + GRU State Encoder
+│   ├── bcq.py                 # BCQ 模型 (VAE + Perturbation + Double Q)
+│   ├── dqn.py                 # DQN 对比模型 (ε-greedy + Replay Buffer)
+│   └── train.py               # 训练循环 + 在线模拟模式
 │
 ├── eval/
-│   └── evaluate.py            # NDCG / Recall / MRR + baselines + learning curve
+│   └── evaluate.py            # NDCG/Recall/MRR + 在线学习曲线
 │
-├── data/ml-25m/ml-25m/        # MovieLens 25M (download required)
-└── output/                    # Auto-generated intermediate files
-    ├── movie_features.parquet
-    ├── user_features.parquet
-    ├── trajectories.parquet
-    ├── bcq_model.pt
-    └── online_windows/        # Time-window data for online simulation
+├── data/ml-25m/ml-25m/        # MovieLens 25M (需下载)
+└── output/                    # 中间数据 & 模型
 ```
 
 ---
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-- **Python** 3.10+ · **Java** 8/11/21 (PySpark requires JVM)
-- **MovieLens 25M**: [download](https://files.grouplens.org/datasets/movielens/ml-25m.zip) (~250MB) → extract to `data/ml-25m/ml-25m/`
+## 🚀 运行
 
 ```bash
 pip install -r requirements.txt
-```
 
-### Local Verification (5K users, ~10 min)
-
-```bash
+# 本地验证 (5K 用户, ~10 分钟)
 python run_pipeline.py --mode local --sample 5000
-```
 
-### Full Training (AutoDL / Cloud GPU)
-
-```bash
-python run_pipeline.py --mode full
-```
-
-### Step-by-Step
-
-```bash
-python spark/preprocess.py       # Spark feature engineering + time-window split
-python spark/trajectories.py     # Trajectory construction (standard)
-python model/train.py            # BCQ training (standard)
-python eval/evaluate.py          # Evaluation with baselines
-python spark/ope.py              # Offline Policy Evaluation
-```
-
----
-
-## 🕐 Online Simulation (Featured)
-
-**用时间窗口模拟持续在线学习** — 逐轮评估模型在 "未来数据" 上的表现，画学习曲线。
-
-```
-Global Timeline [Jan]───[Apr]───[Jul]───[Oct]───[Jan]
-                   W0      W1      W2      W3
-                   │       │       │       │
-Round 1: Train=W0 ─┘ Test=W1  (min data)
-Round 2: Train=W0+W1 ────┘ Test=W2  (growing)
-Round 3: Train=W0+W1+W2 ────┘ Test=W3  (full data)
-                                        ↓
-                      Learning Curve: NDCG↑ or ↓?
-                      Data saturated or distribution shift?
-```
-
-```bash
-# Generate time-window data
+# 在线模拟 — 时间窗口增量学习
 python run_pipeline.py --mode spark-only
-
-# Build trajectories for each round
 python spark/trajectories.py --online
-
-# Train BCQ (online, per-round checkpoints)
-python model/train.py --online --algo bcq
-
-# Train DQN (online, for comparison)
-python model/train.py --online --algo dqn
-
-# Train both BCQ + DQN side-by-side ★
-python model/train.py --online --algo both
-
-# Evaluate learning curves (single algorithm)
-python eval/evaluate.py --online --algo bcq
-
-# Evaluate BCQ vs DQN comparison ★
-python eval/evaluate.py --online --algo both
-
-# Expected output (BCQ vs DQN):
-#   ╔══════════════════════════════════════════════════════════╗
-#   ║  BCQ vs DQN — Online Learning Curve (NDCG@10)          ║
-#   ╚══════════════════════════════════════════════════════════╝
-#   轮   BCQ        DQN        Δ(BCQ-DQN)    诊断
-#   1    0.1234     0.0891     +0.0343       📗 BCQ wins
-#   2    0.1356     0.1201     +0.0155       📗 BCQ wins
-#   3    0.1421     0.1389     +0.0032       📙 tie
-#   🎯 关键发现: 早期 BCQ > DQN → VAE 约束有效防止 distribution shift
+python model/train.py --online --algo both    # BCQ + DQN 对比
+python eval/evaluate.py --online --algo both  # 学习曲线
 ```
 
 ---
 
-## 🧠 Algorithm
+## 📖 学习旅程（真实记录）
 
-### Why Offline RL?
+### 起点：推荐不就是协同过滤吗？
 
-推荐本质是**序列决策** — 推荐什么会影响用户后续行为。传统的 (user, movie) → rating 监督学习只拟合历史，不学策略。
+项目一开始我用纯 pandas 写了个 ItemCF（`itemcf_pandas.py`）。评分矩阵 → 均值中心化 → 余弦相似度 → 加权推荐。整个过程没有损失函数、没有梯度、没有任何 ML 库——只有线性代数和排序。
 
-Online RL 需要实时交互环境，MovieLens 是静态快照 → 走 **Offline RL**：从历史轨迹中学策略。
+这让我对"推荐系统最基本的信号来自哪里"有了直观感受：**共现**。两部电影被同一群人喜欢，它们就有协同关系。
 
-### Why BCQ?
+### 转折：看了王喆书，意识到推荐是序列决策
 
-BCQ (Batch-Constrained Q-Learning, **Fujimoto et al., ICML 2019**) 解决 offline RL 的核心问题 — **distribution shift**。
+王喆老师在书里反复强调一个观点：**推荐不是"猜你喜欢什么"，而是"在这个时间点推什么能让你继续用下去"**。前者是监督学习（拟合历史），后者是序列决策（影响未来）。
 
-标准 DQN 在 offline 数据上直接训练会崩溃：Q 网络对 "没出现过的 action" 给出荒谬高估值 → 策略选错。
+这让我开始思考：如果推荐会影响用户的后续行为，那每个推荐决策就需要考虑长期收益。这正是强化学习的框架——state（用户当时的兴趣状态）、action（推荐什么）、reward（用户反馈）、next_state（看完后的新状态）。
 
-BCQ 用 VAE 约束策略：
+### 尝试：用 Spark 窗口函数做范式转换
+
+把 2500 万条静态评分变成 RL 训练轨迹，是工程上最考验人的一步。
+
+```sql
+-- 核心逻辑（Spark 窗口函数）
+SELECT userId, timestamp,
+  COLLECT_LIST(STRUCT(movieId, rating)) OVER (
+    PARTITION BY userId ORDER BY timestamp
+    ROWS BETWEEN 10 PRECEDING AND 1 PRECEDING
+  ) AS state,                                          -- 最近10部 = 当前兴趣状态
+  movieId AS action,                                   -- 当前推荐 = 决策
+  rating AS reward,                                    -- 用户评分 = 反馈
+  COLLECT_LIST(STRUCT(movieId, rating)) OVER (
+    PARTITION BY userId ORDER BY timestamp
+    ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+  ) AS next_state                                      -- 看完后 = 新状态
+FROM ratings_train
+```
+
+这一步体现了 Spark 窗口函数在推荐场景的真正价值：把一个"监督学习的数据集"转换成"序列决策的数据集"，全程分布式，2500 万条数据分钟级出结果。
+
+### 发现：BCQ 和 DQN 在在线模拟里的差异
+
+我做了 BCQ vs DQN 的在线模拟对比——在 Claude Code 的帮助下实现了两个模型，然后用完全相同的数据和评估流程跑对比。结果：
 
 ```
-π(s) = argmax_{a ~ G(s)} Q(s, a + ξ(s, a))
-                   ↑ VAE sampling   ↑ perturbation (|ξ| ≤ Φ)
+轮1 (25%数据):  BCQ > DQN  差距明显  ← VAE约束在稀疏数据时最有效
+轮2 (50%数据):  BCQ > DQN  差距缩小
+轮3 (75%数据):  BCQ ≈ DQN  逐渐拉平  ← 数据够了，无约束DQN也能学好
 ```
 
-只在 "历史行为覆盖的区域" 内选动作，从根本上避免外推错误。
+这个实验让我直观地感受到了书里说的 **Distribution Shift** 问题：当数据不足以覆盖动作空间时，没约束的 Q-Learning 会对"没见过的电影"给出虚高估值，导致推荐质量下降。BCQ 的 VAE 约束就是为这个问题设计的。
 
-### Components
+### 当前状态：知道方向，还在填细节
 
-| Component | Role | Interview Hook |
-|-----------|------|----------------|
-| **VAE Generator** | Learn behavior policy distribution, constrain candidates | "Distribution Shift 的数学解法" |
-| **Perturbation ξ** | Small improvement within data support (clipped to Φ) | "有限探索 (Limited Exploration)" |
-| **Q-Network (×2)** | Value estimation (Double Q prevents overestimation) | "Bellman Equation, TD Error" |
-| **State Encoder (GRU)** | Encode rating history → state vector | "序列建模 vs 静态特征" |
+我现在能讲清楚的部分：
+- ✅ 为什么推荐适合建模成序列决策
+- ✅ Distribution Shift 的直觉和为什么需要约束
+- ✅ BCQ 和 DQN 在离线场景的对比意义
+- ✅ Spark 窗口函数做轨迹构建的工程实现
+- ✅ 在线模拟评估框架的设计思路
+
+我还在学/需要补的部分：
+- 📖 VAE 的 ELBO 推导和重参数化技巧的数学细节
+- 📖 OPE 估计器的统计性质（IPS 的无偏性证明、DR 的双重鲁棒性理论）
+- 📖 BCQ vs CQL vs BEAR 的算法选择依据——目前只知道 BCQ 的约束逻辑最直观
+- 📖 HSTU（Meta GR）的无 Softmax 注意力机制——这是 Generative Recommender 的前沿方向
 
 ---
 
-## 📊 Interview Cheat Sheet
+## 🔬 消融实验思路
 
-### Spark 八股 → Code Mapping
-
-| Question | Where |
-|----------|-------|
-| Lazy Evaluation | `preprocess.py` — transformations build DAG, actions trigger compute |
-| Wide vs Narrow Dependency | `preprocess.py` — `groupBy` → Shuffle (wide); `select`/`filter` → none (narrow) |
-| Window Functions | `trajectories.py` — `PARTITION BY userId ORDER BY timestamp ROWS BETWEEN K PRECEDING` |
-| Broadcast Join | `preprocess.py` — `F.broadcast()` small table to all executors |
-| Data Skew | `trajectories.py` — analyze_user_activity() heavy-user warning |
-| AQE | `config.py` — `spark.sql.adaptive.enabled = true` |
-| Parquet | `preprocess.py` — columnar, predicate pushdown, schema self-contained |
-
-### RL 八股 → Concept Mapping
-
-| Question | Concept |
-|----------|---------|
-| MDP Modeling | State / Action / Reward / Transition definition |
-| Bellman Equation | TD target: `r + γ · max Q'(s', a')` |
-| Off-Policy vs Offline | Off-policy: learn from others' data; Offline: learn from fixed dataset |
-| Distribution Shift | Why BCQ exists — Q extrapolates on unseen actions |
-| Double DQN | Two Q-nets → min(Q1, Q2) prevents overestimation |
-| Target Network | Polyak averaging: `θ' ← τ·θ + (1-τ)·θ'` |
-| OPE | IPS (unbiased, high variance) / DM (biased, low variance) / DR (doubly robust) |
-
----
-
-## 🔬 Ablation Study Design
+我不是在调参优化最高指标，而是想验证"BCQ 的每个组件各自贡献了什么"：
 
 ```
 BCQ Full:    VAE + Perturbation + Double Q
-- VAE:       VAE → uniform sampling (measure constraint value)
-- Perturb:   Φ = 0 (measure perturbation value)
-- Double Q:  Single Q (measure overestimation)
+- VAE:       VAE → uniform sampling    (去掉行为约束)
+- Perturb:   Φ = 0                     (去掉有限改进)
+- Double Q:  Single Q                  (去掉防过估计)
 
-Expected: BCQ > No-Perturb > No-VAE > Random
-           No-VAE shows most severe Q-value inflation (distribution shift proof)
+预期: BCQ > No-Perturb > No-VAE > Random
+      No-VAE 应该出现最严重的 Q 值虚高 → Distribution Shift 的实证
 ```
 
 ---
 
-## 📦 References
+## 📊 面试叙事（诚实版）
 
-- **BCQ**: Fujimoto et al., *"Off-Policy Deep Reinforcement Learning without Exploration"*, ICML 2019
-- **MovieLens 25M**: GroupLens Research, https://grouplens.org/datasets/movielens/25m/
-- **OPE**: Dudík et al., *"Doubly Robust Policy Evaluation and Learning"*, ICML 2011
+当面试官问"这个项目你做了什么"，我会这样讲：
+
+> "我做了两件事。第一是 Spark 工程——用窗口函数把 MovieLens 25M 数据构建成推荐模型的训练管线，包括特征工程、轨迹构建、在线模拟评估。这部分是我独立完成的。
+>
+> 第二是跟着王喆老师的书做了一个 RL 技术探索——把推荐建模成序列决策，在 Claude Code 的辅助下实现了 BCQ 和 DQN 的对比实验。我目前对 RL 的理解程度是知道'为什么需要约束'、'各组件起什么作用'，但数学细节还在补。这个部分对我更多是一个学习过程。"
+
+如果面试官追问 BCQ 的技术细节：
+
+| 问题 | 我的诚实回答方向 |
+|------|----------------|
+| "为什么用 BCQ？" | 王喆书里提到离线场景的核心问题是分布偏移，BCQ 的 VAE 约束是解决这个的经典方案。我对比了 BCQ 和 无约束 DQN，实验上也验证了约束的价值 |
+| "VAE 的 ELBO 是什么？" | 这是我在补的数学基础部分——目前知道 VAE 通过编码-解码学习历史行为的分布，但 ELBO 的推导我能讲直觉还不能手推 |
+| "为什么不用 CQL？" | 我知道 CQL 是另一个离线 RL 方案，但我还没读那篇论文，没法做技术对比 |
+| "Spark 窗口函数怎么写的？" | 随时可以展开 PARTITION BY + ROWS BETWEEN 的完整逻辑 ← 这是我真的掌握的 |
+
+> 核心原则：**工程部分——我做了，我能讲，你可以深挖。RL 部分——我在学，我试了，我有实验结论，但数学细节还在路上。不装。**
 
 ---
 
-## 👤 Author
+## 📦 参考 & 致谢
+
+- **王喆**：《深度学习推荐系统 2.0》，电子工业出版社，2025 —— 这个项目 RL 部分的理论来源
+- **BCQ**: Fujimoto et al., "Off-Policy Deep Reinforcement Learning without Exploration", ICML 2019
+- **MovieLens 25M**: GroupLens Research
+- **OPE**: Dudík et al., "Doubly Robust Policy Evaluation and Learning", ICML 2011
+- **Claude Code**: Anthropic —— 代码生成、架构建议、技术文档辅助
+- **ItemCF 参考**: 王喆《深度学习推荐系统》第2章
+
+---
+
+## 👤 作者
 
 **南志锦 (Nan Zhijin)** — 2026
 
-> *"别人用协同过滤做推荐，我用强化学习。别人单机 Pandas，我 Spark 分布式。这个项目出来，面试官会记住我。"*
-
-⭐ If this project helps your interview prep, give it a star!
+> *本科，转行算法。Spark + 推荐是我真的会的东西；RL 是我在学、在试、在思考的东西。这个 README 如实记录了一个学习过程，而不是一个虚假的"成品"。*
